@@ -117,7 +117,7 @@ impl EncryptedTally {
     pub fn add(&mut self, vote: &EncryptedVote, weight: u64) {
         assert_eq!(vote.len(), self.r.len());
         for (ri, ci) in self.r.iter_mut().zip(vote.iter()) {
-            *ri = &*ri + &(ci * Scalar::from_u64(weight));
+            *ri = &*ri + &(ci * weight);
         }
     }
 

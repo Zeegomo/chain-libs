@@ -296,6 +296,14 @@ impl<'a, 'b> Mul<&'b Scalar> for &'a GroupElement {
     }
 }
 
+impl<'a, 'b> Mul<u64> for &'a GroupElement {
+    type Output = GroupElement;
+
+    fn mul(self, other: u64) -> GroupElement {
+        GroupElement(self.0.scale_u64(other))
+    }
+}
+
 lref!(Scalar, Mul, GroupElement, GroupElement, mul);
 rref!(Scalar, Mul, GroupElement, GroupElement, mul);
 nref!(Scalar, Mul, GroupElement, GroupElement, mul);

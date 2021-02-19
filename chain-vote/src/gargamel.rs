@@ -172,6 +172,16 @@ impl<'a> Mul<Scalar> for &'a Ciphertext {
     }
 }
 
+impl<'a> Mul<u64> for &'a Ciphertext {
+    type Output = Ciphertext;
+    fn mul(self, rhs: u64) -> Self::Output {
+        Ciphertext {
+            e1: &self.e1 * rhs,
+            e2: &self.e2 * rhs,
+        }
+    }
+}
+
 impl<'a, 'b> Mul<&'b Scalar> for &'a Ciphertext {
     type Output = Ciphertext;
     fn mul(self, rhs: &'b Scalar) -> Self::Output {
