@@ -4,6 +4,7 @@
 mod macros;
 mod commitment;
 pub mod committee;
+pub mod decr_nizk;
 mod encrypted;
 pub mod encryption;
 mod gang;
@@ -21,6 +22,8 @@ pub mod debug {
         pub use crate::private_voting::*;
     }
 }
+
+use decr_nizk::ProofDecrypt;
 
 pub use committee::{
     MemberCommunicationKey, MemberCommunicationPublicKey, MemberPublicKey, MemberState,
@@ -87,7 +90,13 @@ pub struct EncryptedTally {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TallyDecryptShare {
-    r1s: Vec<gang::GroupElement>,
+    elements: Vec<ProvenDecryptShare>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ProvenDecryptShare {
+    r1: gang::GroupElement,
+    pi: ProofDecrypt,
 }
 
 #[derive(Clone)]
@@ -124,15 +133,25 @@ impl EncryptedTally {
         }
     }
 
-    pub fn finish(&self, secret_key: &OpeningVoteKey) -> (TallyState, TallyDecryptShare) {
+    pub fn finish<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        secret_key: &OpeningVoteKey,
+    ) -> (TallyState, TallyDecryptShare) {
         let mut dshares = Vec::with_capacity(self.r.len());
         let mut r2s = Vec::with_capacity(self.r.len());
         for r in &self.r {
-            let (r1, r2) = r.elements();
-            dshares.push(r1 * &secret_key.0.sk);
-            r2s.push(r2.clone());
+            // todo: we are decrypting twice, we can probably improve this
+            let decrypted_share = &r.e1 * &secret_key.0.sk;
+            let pk = MemberPublicKey::from(secret_key);
+            let proof = ProofDecrypt::generate(&r, &pk.0, &secret_key.0, rng);
+            dshares.push(ProvenDecryptShare {
+                r1: decrypted_share,
+                pi: proof,
+            });
+            r2s.push(r.e2.clone());
         }
-        (TallyState { r2s }, TallyDecryptShare { r1s: dshares })
+        (TallyState { r2s }, TallyDecryptShare { elements: dshares })
     }
 
     pub fn state(&self) -> TallyState {
@@ -177,25 +196,54 @@ impl std::ops::Add for EncryptedTally {
     }
 }
 
+impl ProvenDecryptShare {
+    const SIZE: usize = decr_nizk::PROOF_SIZE + GroupElement::BYTES_LEN;
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != ProvenDecryptShare::SIZE {
+            return None;
+        }
+
+        let r1 = gang::GroupElement::from_bytes(&bytes[0..GroupElement::BYTES_LEN])?;
+        let proof = decr_nizk::ProofDecrypt::from_slice(&bytes[GroupElement::BYTES_LEN..])?;
+        Some(ProvenDecryptShare { r1, pi: proof })
+    }
+}
+
 impl TallyDecryptShare {
     /// Number of voting options this taly decrypt share structure is
     /// constructed for.
     pub fn options(&self) -> usize {
-        self.r1s.len()
+        self.elements.len()
     }
 
     /// Size of the byte representation for a tally decrypt share
     /// with the given number of options.
     pub fn bytes_len(options: usize) -> usize {
-        group_elements_bytes_len(options)
+        (decr_nizk::PROOF_SIZE + GroupElement::BYTES_LEN)
+            .checked_mul(options)
+            .expect("integer overflow")
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        group_elements_to_bytes(&self.r1s)
+        let mut out = Vec::new();
+        for element in self.elements.iter() {
+            out.extend_from_slice(element.r1.to_bytes().as_ref());
+            out.extend_from_slice(&element.pi.to_bytes());
+        }
+        out
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        group_elements_from_bytes(bytes).map(|r1s| Self { r1s })
+        if bytes.len() % ProvenDecryptShare::SIZE != 0 {
+            return None;
+        }
+
+        let elements = bytes
+            .chunks(ProvenDecryptShare::SIZE)
+            .map(ProvenDecryptShare::from_bytes)
+            .collect::<Option<Vec<_>>>()?;
+        Some(TallyDecryptShare { elements })
     }
 }
 
@@ -242,12 +290,25 @@ fn group_elements_from_bytes(bytes: &[u8]) -> Option<Vec<gang::GroupElement>> {
     Some(elements)
 }
 
+fn verify_decrypt_share(
+    encrypted_tally: &EncryptedTally,
+    pk: &committee::MemberPublicKey,
+    decrypt_share: &TallyDecryptShare,
+) -> bool {
+    for (element, r) in decrypt_share.elements.iter().zip(encrypted_tally.r.iter()) {
+        if !element.pi.verify(&r, &(&r.e2 - &element.r1), &pk.0) {
+            return false;
+        }
+    }
+    true
+}
+
 fn result_vector(
     tally_state: &TallyState,
     decrypt_shares: &[TallyDecryptShare],
 ) -> Vec<gang::GroupElement> {
     let ris = (0..tally_state.r2s.len())
-        .map(|i| gang::GroupElement::sum(decrypt_shares.iter().map(|ds| &ds.r1s[i])));
+        .map(|i| gang::GroupElement::sum(decrypt_shares.iter().map(|ds| &ds.elements[i].r1)));
 
     let results = tally_state
         .r2s
@@ -271,12 +332,27 @@ pub fn tally(
 }
 
 impl Tally {
+    /// Verifies that `TallyDecryptShare` are correct decryptions of `encrypted_tally` for public
+    /// keys `pks`.
+    ///
     /// Verifies that the decrypted tally was correctly obtained from the given
     /// `TallyState` and `TallyDecryptShare` parts.
     ///
     /// This can be used for quick online validation for the tallying
     /// performed offline.
-    pub fn verify(&self, tally_state: &TallyState, decrypt_shares: &[TallyDecryptShare]) -> bool {
+    pub fn verify(
+        &self,
+        encrypted_tally: &EncryptedTally,
+        pks: &[committee::MemberPublicKey],
+        tally_state: &TallyState,
+        decrypt_shares: &[TallyDecryptShare],
+    ) -> bool {
+        for (pk, decrypt_share) in pks.iter().zip(decrypt_shares.iter()) {
+            if !verify_decrypt_share(encrypted_tally, pk, decrypt_share) {
+                return false;
+            }
+        }
+
         let r_results = result_vector(tally_state, decrypt_shares);
         let gen = gang::GroupElement::generator();
         for (i, &w) in self.votes.iter().enumerate() {
@@ -291,6 +367,7 @@ impl Tally {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encryption::Keypair;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -326,7 +403,9 @@ mod tests {
         tally.add(&e2.0, 5);
         tally.add(&e3.0, 4);
 
-        let (ts, tds1) = tally.finish(m1.secret_key());
+        let (ts, tds1) = tally.finish(&mut rng, m1.secret_key());
+
+        assert_eq!(verify_decrypt_share(&tally, &m1.public_key(), &tds1), true);
 
         let max_votes = 20;
 
@@ -342,7 +421,7 @@ mod tests {
         assert_eq!(tr.votes[1], 5, "vote for option 1");
 
         println!("verifying");
-        assert!(tr.verify(&ts, &shares));
+        assert!(tr.verify(&tally, &participants, &ts, &shares));
     }
 
     #[test]
@@ -382,9 +461,17 @@ mod tests {
         tally.add(&e2.0, 3);
         tally.add(&e3.0, 4);
 
-        let (_, tds1) = tally.finish(m1.secret_key());
-        let (_, tds2) = tally.finish(m2.secret_key());
-        let (ts, tds3) = tally.finish(m3.secret_key());
+        let (_, tds1) = tally.finish(&mut rng, m1.secret_key());
+        let (_, tds2) = tally.finish(&mut rng, m2.secret_key());
+        let (ts, tds3) = tally.finish(&mut rng, m3.secret_key());
+
+        // check that the verify shares are correct for each participants
+        assert_eq!(verify_decrypt_share(&tally, &m1.public_key(), &tds1), true);
+        assert_eq!(verify_decrypt_share(&tally, &m2.public_key(), &tds2), true);
+        assert_eq!(verify_decrypt_share(&tally, &m3.public_key(), &tds3), true);
+
+        // check a mismatch parameters (m2 key with m1's share) is detected
+        assert_eq!(verify_decrypt_share(&tally, &m2.public_key(), &tds1), false);
 
         let max_votes = 20;
 
@@ -400,7 +487,7 @@ mod tests {
         assert_eq!(tr.votes[1], 3, "vote for option 1");
 
         println!("verifying");
-        assert!(tr.verify(&ts, &shares));
+        assert!(tr.verify(&tally, &participants, &ts, &shares));
     }
 
     #[test]
@@ -431,7 +518,7 @@ mod tests {
         let mut tally = EncryptedTally::new(vote_options);
         tally.add(&e1, 42);
 
-        let (ts, tds1) = tally.finish(m1.secret_key());
+        let (ts, tds1) = tally.finish(&mut rng, m1.secret_key());
 
         let max_votes = 42;
 
@@ -447,7 +534,7 @@ mod tests {
         assert_eq!(tr.votes[1], 0, "vote for option 1");
 
         println!("verifying");
-        assert!(tr.verify(&ts, &shares));
+        assert!(tr.verify(&tally, &participants, &ts, &shares));
     }
 
     #[test]
@@ -470,7 +557,7 @@ mod tests {
         println!("tallying");
 
         let tally = EncryptedTally::new(vote_options);
-        let (ts, tds1) = tally.finish(m1.secret_key());
+        let (ts, tds1) = tally.finish(&mut rng, m1.secret_key());
 
         let max_votes = 2;
 
@@ -486,7 +573,7 @@ mod tests {
         assert_eq!(tr.votes[1], 0, "vote for option 1");
 
         println!("verifying");
-        assert!(tr.verify(&ts, &shares));
+        assert!(tr.verify(&tally, &[m1.public_key()], &ts, &shares));
     }
 
     #[test]
@@ -523,9 +610,9 @@ mod tests {
         tally.add(&e2.0, 3);
         tally.add(&e3.0, 40);
 
-        let (_, tds1) = tally.finish(m1.secret_key());
-        let (_, tds2) = tally.finish(m2.secret_key());
-        let (ts, tds3) = tally.finish(m3.secret_key());
+        let (_, tds1) = tally.finish(&mut rng, m1.secret_key());
+        let (_, tds2) = tally.finish(&mut rng, m2.secret_key());
+        let (ts, tds3) = tally.finish(&mut rng, m3.secret_key());
 
         let max_votes = 4;
 
@@ -547,5 +634,37 @@ mod tests {
         let bytes = tally.to_bytes();
         let deserialized_tally = EncryptedTally::from_bytes(&bytes).unwrap();
         assert_eq!(tally, deserialized_tally);
+    }
+
+    #[test]
+    fn serialize_tally_decrypt_share() {
+        let mut r = ChaCha20Rng::from_seed([0u8; 32]);
+
+        let keypair = Keypair::generate(&mut r);
+
+        let plaintext = GroupElement::from_hash(&[0u8]);
+        let ciphertext = keypair.public_key.encrypt_point(&plaintext, &mut r);
+
+        let proof = ProofDecrypt::generate(
+            &ciphertext,
+            &keypair.public_key,
+            &keypair.secret_key,
+            &mut r,
+        );
+
+        let share = &ciphertext.e1 * &keypair.secret_key.sk;
+        let prover_share = ProvenDecryptShare {
+            pi: proof,
+            r1: share,
+        };
+        let tally_dec_share = TallyDecryptShare {
+            elements: vec![prover_share],
+        };
+        let bytes = tally_dec_share.to_bytes();
+
+        assert_eq!(bytes.len(), TallyDecryptShare::bytes_len(1));
+
+        let tally_from_bytes = TallyDecryptShare::from_bytes(&bytes);
+        assert!(tally_from_bytes.is_some());
     }
 }
