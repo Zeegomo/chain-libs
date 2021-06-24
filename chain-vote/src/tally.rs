@@ -1,6 +1,6 @@
 use crate::{
     committee::*,
-    cryptography::{Ciphertext, CorrectElGamalDecrZkp},
+    cryptography::{Ciphertext, CorrectElGamalDecrZkp, PublicKey},
     encrypted_vote::EncryptedVote,
     gang::{baby_step_giant_step, BabyStepsTable as TallyOptimizationTable, GroupElement},
 };
@@ -106,16 +106,25 @@ impl EncryptedTally {
     /// election options in the form of `GroupElements`. To get the final results, one
     /// needs to compute the discrete logarithm of these values, which is performed in
     /// `decrypt_tally`.
-    fn decrypt(&self, decrypt_shares: &[TallyDecryptShare]) -> Vec<GroupElement> {
+    fn decrypt(
+        &self,
+        decrypt_shares: &[TallyDecryptShare],
+        member_pks: &[MemberPublicKey],
+    ) -> Result<Vec<GroupElement>, TallyError> {
+        for (share, pk) in decrypt_shares.iter().zip(member_pks) {
+            if !share.verify(&self, pk) {
+                return Err(TallyError);
+            }
+        }
         let state: Vec<GroupElement> = self.r.iter().map(|c| c.e2.clone()).collect();
         let ris = (0..state.len())
             .map(|i| GroupElement::sum(decrypt_shares.iter().map(|ds| &ds.elements[i].r1)));
 
-        state
+        Ok(state
             .iter()
             .zip(ris)
             .map(|(r2, r1)| r2 - r1)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>())
     }
 
     /// Given the `decrypt_shares` of all committee members, `max_votes`, and a tally optimization
@@ -125,9 +134,10 @@ impl EncryptedTally {
         &self,
         max_votes: u64,
         decrypt_shares: &[TallyDecryptShare],
+        member_pks: &[MemberPublicKey],
         table: &TallyOptimizationTable,
     ) -> Result<Tally, TallyError> {
-        let r_results = self.decrypt(decrypt_shares);
+        let r_results = self.decrypt(decrypt_shares, member_pks)?;
         let votes = baby_step_giant_step(r_results, max_votes, table).map_err(|_| TallyError)?;
         Ok(Tally { votes })
     }
@@ -191,7 +201,7 @@ impl ProvenDecryptShare {
 impl TallyDecryptShare {
     /// Given the member's public key `MemberPublicKey`, and the `EncryptedTally`, verifies the
     /// correctness of the `TallyDecryptShare`.
-    fn verify_decrypt_share(&self, encrypted_tally: &EncryptedTally, pk: &MemberPublicKey) -> bool {
+    fn verify(&self, encrypted_tally: &EncryptedTally, pk: &MemberPublicKey) -> bool {
         for (element, r) in self.elements.iter().zip(encrypted_tally.r.iter()) {
             if !element.pi.verify(&r, &(&r.e2 - &element.r1), &pk.0) {
                 return false;
@@ -251,13 +261,11 @@ impl Tally {
         pks: &[MemberPublicKey],
         decrypt_shares: &[TallyDecryptShare],
     ) -> bool {
-        for (pk, decrypt_share) in pks.iter().zip(decrypt_shares.iter()) {
-            if !decrypt_share.verify_decrypt_share(encrypted_tally, pk) {
-                return false;
-            }
-        }
-
-        let r_results = encrypted_tally.decrypt(decrypt_shares);
+        let r_results = if let Ok(decrypted) = encrypted_tally.decrypt(decrypt_shares, pks) {
+            decrypted
+        } else {
+            return false;
+        };
         let gen = GroupElement::generator();
         for (i, &w) in self.votes.iter().enumerate() {
             if &gen * w != r_results[i] {
