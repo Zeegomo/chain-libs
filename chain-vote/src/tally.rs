@@ -1,6 +1,6 @@
 use crate::{
     committee::*,
-    cryptography::{Ciphertext, DleqZkp},
+    cryptography::{Ciphertext, CorrectElGamalDecrZkp},
     encrypted_vote::Ballot,
     gang::{baby_step_giant_step, BabyStepsTable as TallyOptimizationTable, GroupElement},
 };
@@ -14,7 +14,7 @@ pub type OpeningVoteKey = MemberSecretKey;
 /// A proof of correct decryption share consists of a dleq zkp, where the committee member proves
 /// that the `DecryptionShare` is honestly derived from the `EncryptedTally` and the committee private
 /// key correspondig to its public key without disclosing it.
-pub type ProofOfCorrectShare = DleqZkp;
+pub type ProofOfCorrectShare = CorrectElGamalDecrZkp;
 
 /// Submitted vote, which constists of an `EncryptedVote` and a `
 /// Common Reference String
