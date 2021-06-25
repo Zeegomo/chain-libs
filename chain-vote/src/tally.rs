@@ -353,7 +353,7 @@ mod tests {
 
         println!("tallying");
 
-        let mut encrypted_tally = EncryptedTally::new(vote_options, &ek, &h);
+        let mut encrypted_tally = EncryptedTally::new(vote_options, ek.clone(), h.clone());
         encrypted_tally.add(
             &Ballot::try_from_vote_and_proof(e1, p1, &h, &ek).unwrap(),
             6,
@@ -376,9 +376,7 @@ mod tests {
         println!("resulting");
         let table = TallyOptimizationTable::generate_with_balance(max_votes, 1);
         let tr = encrypted_tally
-            .validate_partial_decryptions(&participants, &shares)
-            .unwrap()
-            .decrypt_tally(max_votes, &table)
+            .decrypt_tally(max_votes, &shares, &participants, &table)
             .unwrap();
 
         println!("{:?}", tr);
@@ -421,7 +419,7 @@ mod tests {
 
         println!("tallying");
 
-        let mut encrypted_tally = EncryptedTally::new(vote_options, &ek, &h);
+        let mut encrypted_tally = EncryptedTally::new(vote_options, ek.clone(), h.clone());
         encrypted_tally.add(
             &Ballot::try_from_vote_and_proof(e1, p1, &h, &ek).unwrap(),
             1,
@@ -440,7 +438,7 @@ mod tests {
         let tds3 = encrypted_tally.partial_decrypt(&mut rng, m3.secret_key());
 
         // check a mismatch parameters (m2 key with m1's share) is detected
-        assert!(!tds1.verify_decrypt_share(&encrypted_tally, &m2.public_key()));
+        assert!(!tds1.verify(&encrypted_tally, &m2.public_key()));
 
         let max_votes = 20;
 
@@ -449,9 +447,7 @@ mod tests {
         println!("resulting");
         let table = TallyOptimizationTable::generate_with_balance(max_votes, 1);
         let tr = encrypted_tally
-            .validate_partial_decryptions(&participants, &shares)
-            .unwrap()
-            .decrypt_tally(max_votes, &table)
+            .decrypt_tally(max_votes, &shares, &participants, &table)
             .unwrap();
 
         println!("{:?}", tr);
@@ -488,7 +484,7 @@ mod tests {
 
         println!("tallying");
 
-        let mut encrypted_tally = EncryptedTally::new(vote_options, &ek, &h);
+        let mut encrypted_tally = EncryptedTally::new(vote_options, ek.clone(), h.clone());
         encrypted_tally.add(
             &Ballot::try_from_vote_and_proof(e1, p1, &h, &ek).unwrap(),
             42,
@@ -503,9 +499,7 @@ mod tests {
         println!("resulting");
         let table = TallyOptimizationTable::generate_with_balance(max_votes, 1);
         let tr = encrypted_tally
-            .validate_partial_decryptions(&participants, &shares)
-            .unwrap()
-            .decrypt_tally(max_votes, &table)
+            .decrypt_tally(max_votes, &shares, &participants, &table)
             .unwrap();
 
         println!("{:?}", tr);
@@ -539,7 +533,7 @@ mod tests {
 
         println!("tallying");
 
-        let encrypted_tally = EncryptedTally::new(vote_options, &ek, &h);
+        let encrypted_tally = EncryptedTally::new(vote_options, ek, h);
         let tds1 = encrypted_tally.partial_decrypt(&mut rng, m1.secret_key());
 
         let max_votes = 2;
@@ -549,9 +543,7 @@ mod tests {
         println!("resulting");
         let table = TallyOptimizationTable::generate_with_balance(max_votes, 1);
         let tr = encrypted_tally
-            .validate_partial_decryptions(&[m1.public_key()], &shares)
-            .unwrap()
-            .decrypt_tally(max_votes, &table)
+            .decrypt_tally(max_votes, &shares, &[m1.public_key()], &table)
             .unwrap();
 
         println!("{:?}", tr);
@@ -592,7 +584,7 @@ mod tests {
         let (e2, p2) = ek.encrypt_and_prove_vote(&mut rng, &h, Vote::new(vote_options, 1));
         let (e3, p3) = ek.encrypt_and_prove_vote(&mut rng, &h, Vote::new(vote_options, 0));
 
-        let mut encrypted_tally = EncryptedTally::new(vote_options, &ek, &h);
+        let mut encrypted_tally = EncryptedTally::new(vote_options, ek.clone(), h.clone());
         encrypted_tally.add(
             &Ballot::try_from_vote_and_proof(e1, p1, &h, &ek).unwrap(),
             10,
@@ -616,10 +608,7 @@ mod tests {
 
         println!("resulting");
         let table = TallyOptimizationTable::generate_with_balance(max_votes, 1);
-        let res = encrypted_tally
-            .validate_partial_decryptions(&participants, &shares)
-            .unwrap()
-            .decrypt_tally(max_votes, &table);
+        let res = encrypted_tally.decrypt_tally(max_votes, &shares, &participants, &table);
 
         assert!(
             res.is_err(),
@@ -634,7 +623,7 @@ mod tests {
             pk: GroupElement::from_hash(&[1u8]),
         });
         let h = Crs::from_hash(&[1u8]);
-        let tally = EncryptedTally::new(3, &election_key, &h);
+        let tally = EncryptedTally::new(3, election_key, h);
         let bytes = tally.to_bytes();
         let deserialized_tally = EncryptedTally::from_bytes(&bytes).unwrap();
         assert_eq!(tally, deserialized_tally);
