@@ -112,8 +112,8 @@ impl ProofOfCorrectVote {
         Self(proof)
     }
 
-    pub(super) fn as_inner(&self) -> &chain_vote::ProofOfCorrectVote {
-        &self.0
+    pub(super) fn as_inner(&self) -> chain_vote::ProofOfCorrectVote {
+        self.0.clone()
     }
 
     pub(crate) fn serialize_in(&self, bb: ByteBuilder<Self>) -> ByteBuilder<Self> {
@@ -139,8 +139,8 @@ impl EncryptedVote {
         Self(vote)
     }
 
-    pub(super) fn as_inner(&self) -> &chain_vote::EncryptedVote {
-        &self.0
+    pub(super) fn as_inner(&self) -> chain_vote::EncryptedVote {
+        self.0.clone()
     }
 
     pub(crate) fn serialize_in(&self, bb: ByteBuilder<Self>) -> ByteBuilder<Self> {
